@@ -1,0 +1,121 @@
+﻿@page "/"
+@attribute [Authorize]
+@implements IAsyncDisposable
+@using ChatBotJob.Interfaces
+@using ChatBotJob.Models
+@inject IChatService Chat
+@inject AuthenticationStateProvider AuthStateProvider
+
+<h3>Chatroom</h3>
+
+<label>Room: </label>
+<select @bind="CurrentRoomId">
+    <option value="general">general</option>
+    <option value="tech">tech</option>
+    <option value="finance">finance</option>
+</select>
+<input placeholder="or type a room" @bind="CustomRoom" />
+<button @onclick="UseCustomRoom">Join</button>
+
+<EditForm Model="this" OnValidSubmit="SendAsync">
+    <InputText @bind-Value="MessageText" placeholder="Type message or /stock=aapl.us" style="width:70%" />
+    <button type="submit">Send</button>
+    <span class="hint">Use /stock=CODE to query the bot</span>
+</EditForm>
+
+<ul class="messages">
+    @if (Messages is null)
+    {
+        <li>Loading…</li>
+    }
+    else
+    {
+        @foreach (var m in Messages)
+        {
+            <li class="@(m.IsBot ? "bot" : "user")">
+                <span class="when">@m.Timestamp.ToLocalTime():t</span>
+                <b>[@m.RoomId]</b> <b>@m.Username</b>: @m.Message
+            </li>
+        }
+    }
+</ul>
+
+@code {
+    private string MessageText { get; set; } = string.Empty;
+    private List<ChatMessage>? Messages;
+
+    private string _currentRoomId = "general";
+    private string CurrentRoomId
+    {
+        get => _currentRoomId;
+        set
+        {
+            if (_currentRoomId != value)
+            {
+                _currentRoomId = value;
+                // fire-and-forget refresh safely
+                _ = InvokeAsync(async () =>
+                {
+                    await LoadMessages();
+                    StateHasChanged();
+                });
+            }
+        }
+    }
+
+    private string CustomRoom { get; set; } = string.Empty;
+
+    private readonly CancellationTokenSource _cts = new();
+    private PeriodicTimer? _poller;
+    private Task? _pollingTask;
+
+    protected override async Task OnInitializedAsync()
+    {
+        await LoadMessages();
+        _poller = new PeriodicTimer(TimeSpan.FromSeconds(2));
+        _pollingTask = RunPollingAsync(_cts.Token);
+    }
+
+    private async Task RunPollingAsync(CancellationToken token)
+    {
+        try
+        {
+            while (_poller is not null && await _poller.WaitForNextTickAsync(token))
+            {
+                await LoadMessages();
+                await InvokeAsync(StateHasChanged);
+            }
+        }
+        catch (OperationCanceledException) { }
+    }
+
+    private async Task LoadMessages() =>
+        Messages = await Chat.LatestAsync(CurrentRoomId);
+
+    private async Task SendAsync()
+    {
+        var auth = await AuthStateProvider.GetAuthenticationStateAsync();
+        var user = auth.User?.Identity?.Name ?? "anonymous";
+        await Chat.SendAsync(user, MessageText, CurrentRoomId);
+        MessageText = string.Empty;
+        await LoadMessages();
+    }
+
+    private async Task UseCustomRoom()
+    {
+        if (!string.IsNullOrWhiteSpace(CustomRoom))
+        {
+            CurrentRoomId = CustomRoom.Trim();
+            CustomRoom = string.Empty;
+            await LoadMessages();
+        }
+    }
+
+    public async ValueTask DisposeAsync()
+    {
+        _cts.Cancel();
+        _poller?.Dispose();
+        if (_pollingTask is not null) { try { await _pollingTask; } catch { } }
+        _cts.Dispose();
+    }
+}
